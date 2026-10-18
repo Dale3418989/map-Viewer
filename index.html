@@ -59,7 +59,7 @@ label.t{font-size:12px;color:var(--mute);display:flex;align-items:center;gap:4px
     <div class="row">
       <label class="t"><input type="checkbox" id="showBase" checked>底圖</label>
       <label class="t"><input type="checkbox" id="showGhost" checked>疊母層</label>
-      <label class="t"><input type="checkbox" id="showPts">標出本場景</label>
+      <label class="t"><input type="checkbox" id="showPts" checked>標出本場景</label>
       <label class="t"><input type="checkbox" id="showFlags" checked>異常</label>
     </div>
     <ul id="res"></ul>
@@ -70,19 +70,42 @@ label.t{font-size:12px;color:var(--mute);display:flex;align-items:center;gap:4px
 <div id="hud">載入中...</div>
 <canvas id="mini" width="240" height="192"></canvas>
 
-<!-- 修正後的正確引號路徑 -->
 <script src="data.js"></script>
 <script src="index.js"></script>
 
 <script>
 "use strict";
+
 const M = window.TILE_META, IX = window.TILE_INDEX || {scenes: [], pts: {}, flags: []};
 const $ = s => document.querySelector(s);
 const cv = $("#map"), g = cv.getContext("2d"), mini = $("#mini"), mg = mini.getContext("2d");
 const T = M.tile, ZMAX = M.zmax;
+
+// ==========================================
+// 【關鍵修復】: 前端自動座標轉換引擎
+// 解決新舊 PDF 尺寸不一致導致座位偏移的問題
+// 舊版標準 PDF 尺寸：12755.9 x 10204.7
+// ==========================================
+const OLD_W = 12755.9052734375;
+const OLD_H = 10204.724609375;
+
+// 自動計算新底圖與舊座標點位的比例映射
+const scaleX = M.W / OLD_W;
+const scaleY = M.H / OLD_H;
+
+// 封裝座標轉換：將 index.js 的舊點位座標轉換到新底圖上的正確位置
+function getPtX(old_x) { return old_x * scaleX; }
+function getPtY(old_y) { return old_y * scaleY; }
+function getRevX(new_x) { return new_x / scaleX; }
+function getRevY(new_y) { return new_y / scaleY; }
+// ==========================================
+
 const scaleOf = z => M.maxScale / Math.pow(2, ZMAX - z);
 const PRESENT = {};
-for (const L in M.present) PRESENT[L] = M.present[L].map(s => Uint8Array.from(atob(s), c => c.charCodeAt(0)));
+for (const L in M.present) {
+  PRESENT[L] = M.present[L].map(s => Uint8Array.from(atob(s), c => c.charCodeAt(0)));
+}
+
 function has(L, z, x, y) {
   const b = PRESENT[L]; if (!b) return false;
   const [nx, ny] = M.levels[z]; if (x < 0 || y < 0 || x >= nx || y >= ny) return false;
@@ -94,18 +117,21 @@ function normId(s) {
        .replace(/[－—–]/g, "-").replace(/\s+/g, "");
   return s.replace(/\d+/g, d => String(parseInt(d, 10)));
 }
+
 const curSide = () => (document.querySelector("input[name=side]:checked") || {}).value || "";
 function setSide(v) { document.querySelectorAll("input[name=side]").forEach(r => r.checked = r.value === (v || "")); }
 function escapeHtml(s) { return String(s).replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c])); }
 
-// ---- 視圖(pt 座標, k = CSS px/pt)
 let W = 0, H = 0, dpr = 1, cx = M.x0 + M.W / 2, cy = M.y0 + M.H / 2, k = 1;
 let marker = null, pick = null, anim = null, dirty = true, hover = null;
 const kFit = () => Math.min(W / M.W, H / M.H) * 0.95, kMax = () => M.maxScale * 3;
+
 function clampView() {
   k = Math.max(kFit() * 0.5, Math.min(kMax(), k));
-  cx = Math.max(M.x0, Math.min(M.x0 + M.W, cx)); cy = Math.max(M.y0, Math.min(M.y0 + M.H, cy));
+  cx = Math.max(M.x0, Math.min(M.x0 + M.W, cx)); 
+  cy = Math.max(M.y0, Math.min(M.y0 + M.H, cy));
 }
+
 function resize() {
   dpr = window.devicePixelRatio || 1; W = innerWidth; H = innerHeight;
   cv.width = W * dpr; cv.height = H * dpr; cv.style.width = W + "px"; cv.style.height = H + "px";
@@ -113,12 +139,13 @@ function resize() {
   mini.width = mw * dpr; mini.height = mh * dpr; mini.style.width = mw + "px"; mini.style.height = mh + "px";
   clampView(); dirty = true;
 }
+
 const toScr = (x, y) => [(x - cx) * k + W / 2, (y - cy) * k + H / 2];
 const toPt = (sx, sy) => [(sx - W / 2) / k + cx, (sy - H / 2) / k + cy];
 
-// ---- 瓦片快取
 const cache = new Map(), CACHE_MAX = 900;
 const packs = new Map(), PACK_MAX = 300;
+
 function packOf(L, z, x, y) {
   const P = M.pack, key = L + "/" + z + "/" + Math.floor(x / P) + "_" + Math.floor(y / P);
   let p = packs.get(key);
@@ -137,6 +164,7 @@ function packOf(L, z, x, y) {
   while (packs.size > PACK_MAX) packs.delete(packs.keys().next().value);
   return p;
 }
+
 function loadPacked(e, L, z, x, y) {
   const P = M.pack;
   packOf(L, z, x, y).then(pk => {
@@ -146,6 +174,7 @@ function loadPacked(e, L, z, x, y) {
       .then(bm => { e.img = bm; e.ok = true; dirty = true; });
   }).catch(() => { e.blank = true; dirty = true; });
 }
+
 function tile(L, z, x, y, want) {
   if (!has(L, z, x, y)) return {blank: true};
   const key = L + "/" + z + "/" + x + "/" + y;
@@ -165,6 +194,7 @@ function tile(L, z, x, y, want) {
   while (cache.size > CACHE_MAX) cache.delete(cache.keys().next().value);
   return e;
 }
+
 function levelFor(kk) { const need = kk * dpr; for (let z = 0; z <= ZMAX; z++) if (scaleOf(z) >= need) return z; return ZMAX; }
 
 function drawLayer(L, z, alpha) {
@@ -190,6 +220,7 @@ function drawLayer(L, z, alpha) {
   }
   g.globalAlpha = 1;
 }
+
 const curView = () => (scene === "*" ? "all" : (document.querySelector("input[name=view]:checked") || {}).value || "scene");
 function setView(v) { document.querySelectorAll("input[name=view]").forEach(r => r.checked = r.value === v); }
 function stack() {
@@ -197,11 +228,10 @@ function stack() {
   const out = [];
   if ($("#showBase").checked && PRESENT[M.base]) out.push([M.base, 1]);
   if ($("#showGhost").checked && SC[scene]) SC[scene].fallback.forEach(f => out.push([f, M.ghost]));
-  if (scene) out.push([scene, 1]);
+  if (scene && PRESENT[scene]) out.push([scene, 1]);
   return out;
 }
 
-// ---- 場景/索引
 const SC = {}; IX.scenes.forEach(s => SC[s.code] = s);
 const CODES = IX.scenes.map(s => s.code);
 let scene = CODES[0] || "";
@@ -212,13 +242,19 @@ const inScope = c => scene === "*" || c === scene;
 function parseQ(text) {
   text = String(text || "").trim();
   const mxy = text.match(/^@?\s*(-?\d+(?:\.\d+)?)\s*[, ]\s*(-?\d+(?:\.\d+)?)$/);
-  if (mxy) return {xy: [parseFloat(mxy[1]), parseFloat(mxy[2])]};
+  // 將查詢的舊座標轉換為新座標
+  if (mxy) return {xy: [getPtX(parseFloat(mxy[1])), getPtY(parseFloat(mxy[2]))]};
   return {id: normId(text.replace(/[東西]/g, "")), side: curSide()};
 }
+
 function find(code, id, side, via) {
   const hits = [];
-  for (const p of ptsOf(code)) if (p[0] === id && (!side || !p[1] || p[1] === side))
-    hits.push({code, via, id: p[0], disp: p[5] || p[0], side: p[1], x: p[2], y: p[3], note: p[4] || ""});
+  for (const p of ptsOf(code)) {
+    if (p[0] === id && (!side || !p[1] || p[1] === side)) {
+      // 點位資料在載入時就轉換成新圖的實際座標
+      hits.push({code, via, id: p[0], disp: p[5] || p[0], side: p[1], x: getPtX(p[2]), y: getPtY(p[3]), note: p[4] || ""});
+    }
+  }
   return hits;
 }
 
@@ -233,20 +269,24 @@ function flyTo(x, y, kk, ms) {
     dirty = true;
   };
 }
+
 let lastHash = "";
 function setHash(o) {
   const q = Object.entries(o).filter(([, v]) => v !== "" && v != null).map(([a, b]) => a + "=" + encodeURIComponent(b)).join("&");
   lastHash = q;
   try { history.replaceState(null, "", "#" + q); } catch (e) { location.replace("#" + q); }
 }
+
 function locateHit(h) {
   marker = {x: h.x, y: h.y, t: performance.now()};
   flyTo(h.x, h.y);
-  $("#msg").innerHTML = "<b>" + escapeHtml(sceneName(scene === "*" ? h.code : scene)) + "・" + escapeHtml(h.disp) + " " + (h.side || "") + "</b> (" + h.x.toFixed(1) + ", " + h.y.toFixed(1) + ")"
+  // 顯示時還原為原始的 12755 座標供使用者看
+  $("#msg").innerHTML = "<b>" + escapeHtml(sceneName(scene === "*" ? h.code : scene)) + "・" + escapeHtml(h.disp) + " " + (h.side || "") + "</b> (" + getRevX(h.x).toFixed(1) + ", " + getRevY(h.y).toFixed(1) + ")"
     + (h.via ? " <span class='warn'>本場景無此點, 沿用 " + h.via + " 位置</span>" : "")
     + (h.note ? "<br>" + escapeHtml(h.note) : "");
   setHash({s: scene, v: curView(), id: h.disp, side: h.side});
 }
+
 function setScene(c, keepQuery) {
   if (!SC[c] && c !== "*") return;
   scene = c; $("#scene").value = c; dirty = true; $("#res").innerHTML = "";
@@ -259,8 +299,8 @@ function doSearch() {
   if (r.xy) {
     const [x, y] = r.xy;
     marker = {x, y, t: performance.now()}; flyTo(x, y);
-    $("#msg").innerHTML = "座標 (" + x + ", " + y + ")" + (x < M.x0 || y < M.y0 || x > M.x0 + M.W || y > M.y0 + M.H ? " <span class='warn'>在頁面外</span>" : "");
-    setHash({s: scene, v: curView(), x, y}); return;
+    $("#msg").innerHTML = "座標 (" + getRevX(x).toFixed(1) + ", " + getRevY(y).toFixed(1) + ")" + (x < M.x0 || y < M.y0 || x > M.x0 + M.W || y > M.y0 + M.H ? " <span class='warn'>在頁面外</span>" : "");
+    setHash({s: scene, v: curView(), x: getRevX(x).toFixed(1), y: getRevY(y).toFixed(1)}); return;
   }
   if (!r.id) return;
   let hits = scene === "*" ? [].concat(...CODES.map(c => find(c, r.id, r.side, ""))) : find(scene, r.id, r.side, "");
@@ -276,7 +316,7 @@ function doSearch() {
   if (hits.length === 1) { locateHit(hits[0]); return; }
   hits.forEach(h => {
     const li = document.createElement("li");
-    li.innerHTML = "<span>" + (scene === "*" ? "<b>" + escapeHtml(sceneName(h.code)) + "</b> " : "") + escapeHtml(h.disp) + " " + (h.side || "") + (h.via ? "（" + h.via + "）" : "") + "</span><small>" + h.x.toFixed(0) + ", " + h.y.toFixed(0) + "</small>";
+    li.innerHTML = "<span>" + (scene === "*" ? "<b>" + escapeHtml(sceneName(h.code)) + "</b> " : "") + escapeHtml(h.disp) + " " + (h.side || "") + (h.via ? "（" + h.via + "）" : "") + "</span><small>" + getRevX(h.x).toFixed(0) + ", " + getRevY(h.y).toFixed(0) + "</small>";
     li.onclick = () => { [...ul.children].forEach(c => c.classList.remove("on")); li.classList.add("on"); locateHit(h); };
     ul.appendChild(li);
   });
@@ -287,18 +327,21 @@ function doSearch() {
 function nearest(x, y, rad) {
   let best = null, bd = rad * rad;
   const scan = (c, via) => { for (const p of ptsOf(c)) {
-    const d = (p[2] - x) ** 2 + (p[3] - y) ** 2;
-    if (d < bd) { bd = d; best = {code: c, via, id: p[0], disp: p[5] || p[0], side: p[1], x: p[2], y: p[3], note: p[4] || ""}; }
+    const nx = getPtX(p[2]), ny = getPtY(p[3]);
+    const d = (nx - x) ** 2 + (ny - y) ** 2;
+    if (d < bd) { bd = d; best = {code: c, via, id: p[0], disp: p[5] || p[0], side: p[1], x: nx, y: ny, note: p[4] || ""}; }
   } };
   if (scene === "*") CODES.forEach(c => scan(c, "")); else scan(scene, "");
   if ($("#showGhost").checked && SC[scene] && !best) SC[scene].fallback.forEach(f => scan(f, f));
   return best;
 }
+
 function nearestFlag(x, y, rad) {
   let best = null, bd = rad * rad;
   for (const f of IX.flags || []) {
     if (f[0] && !inScope(f[0])) continue;
-    const d = (f[3] - x) ** 2 + (f[4] - y) ** 2;
+    const nx = getPtX(f[3]), ny = getPtY(f[4]);
+    const d = (nx - x) ** 2 + (ny - y) ** 2;
     if (d < bd) { bd = d; best = f; }
   }
   return best;
@@ -307,19 +350,24 @@ function nearestFlag(x, y, rad) {
 function drawOverlay() {
   const [a0, b0] = toPt(0, 0), [a1, b1] = toPt(W, H), pad = 10 / k;
   const vis = (x, y) => x > a0 - pad && x < a1 + pad && y > b0 - pad && y < b1 + pad;
+  
   if ($("#showPts").checked && scene) {
     const r = Math.max(2, 3.6 * k);
     g.strokeStyle = "rgba(11,107,203,.85)"; g.lineWidth = Math.max(1, Math.min(2.5, k * 0.3));
     g.beginPath();
-    for (const p of (scene === "*" ? [].concat(...CODES.map(ptsOf)) : ptsOf(scene))) if (vis(p[2], p[3])) { const [sx, sy] = toScr(p[2], p[3]); g.moveTo(sx + r, sy); g.arc(sx, sy, r, 0, 7); }
+    for (const p of (scene === "*" ? [].concat(...CODES.map(ptsOf)) : ptsOf(scene))) {
+        const nx = getPtX(p[2]), ny = getPtY(p[3]);
+        if (vis(nx, ny)) { const [sx, sy] = toScr(nx, ny); g.moveTo(sx + r, sy); g.arc(sx, sy, r, 0, 7); }
+    }
     g.stroke();
   }
   if ($("#showFlags").checked && IX.flags && IX.flags.length) {
     const r = Math.max(4, 4.5 * k);
     g.fillStyle = "rgba(192,57,43,.22)"; g.strokeStyle = "rgba(192,57,43,.95)"; g.lineWidth = 1.5;
     for (const f of IX.flags) {
-      if ((f[0] && !inScope(f[0])) || !vis(f[3], f[4])) continue;
-      const [sx, sy] = toScr(f[3], f[4]);
+      const nx = getPtX(f[3]), ny = getPtY(f[4]);
+      if ((f[0] && !inScope(f[0])) || !vis(nx, ny)) continue;
+      const [sx, sy] = toScr(nx, ny);
       g.beginPath(); g.moveTo(sx, sy - r); g.lineTo(sx + r * .87, sy + r * .5); g.lineTo(sx - r * .87, sy + r * .5); g.closePath(); g.fill(); g.stroke();
     }
   }
@@ -336,6 +384,7 @@ function drawOverlay() {
     g.moveTo(sx, 0); g.lineTo(sx, sy - r0); g.moveTo(sx, sy + r0); g.lineTo(sx, H); g.stroke(); g.setLineDash([]);
   }
 }
+
 function drawMini() {
   const mw = mini.width / dpr, mh = mini.height / dpr, s = mw / M.W;
   mg.setTransform(dpr, 0, 0, dpr, 0, 0); mg.fillStyle = "#fff"; mg.fillRect(0, 0, mw, mh);
@@ -353,6 +402,7 @@ function drawMini() {
   mg.strokeRect((a0 - M.x0) * s, (b0 - M.y0) * s, (a1 - a0) * s, (b1 - b0) * s);
   if (marker) { mg.fillStyle = "#e60000"; mg.beginPath(); mg.arc((marker.x - M.x0) * s, (marker.y - M.y0) * s, 3, 0, 7); mg.fill(); }
 }
+
 function frame(t) {
   if (anim) anim(t);
   if (dirty) {
@@ -362,13 +412,12 @@ function frame(t) {
     const z = levelFor(k);
     for (const [L, a] of stack()) drawLayer(L, z, a);
     drawOverlay(); drawMini();
-    $("#hud").textContent = sceneName(scene) + "  z" + z + "  " + k.toFixed(2) + " px/pt  中心 " + cx.toFixed(1) + ", " + cy.toFixed(1)
-      + (hover ? "  游標 " + hover[0].toFixed(1) + ", " + hover[1].toFixed(1) : "");
+    $("#hud").textContent = sceneName(scene) + "  z" + z + "  " + k.toFixed(2) + " px/pt  中心 " + getRevX(cx).toFixed(1) + ", " + getRevY(cy).toFixed(1)
+      + (hover ? "  游標 " + getRevX(hover[0]).toFixed(1) + ", " + getRevY(hover[1]).toFixed(1) : "");
   }
   requestAnimationFrame(frame);
 }
 
-// ---- 互動
 const ptrs = new Map(); let down = null, pinch0 = null;
 function zoomAt(sx, sy, f) {
   const [px, py] = toPt(sx, sy); k = Math.max(kFit() * 0.5, Math.min(kMax(), k * f));
@@ -403,21 +452,24 @@ function up(e) {
 }
 cv.addEventListener("pointerup", up); cv.addEventListener("pointercancel", up);
 cv.addEventListener("dblclick", e => zoomAt(e.clientX, e.clientY, 2));
+
 function clickAt(sx, sy) {
   const [x, y] = toPt(sx, sy), rad = Math.max(6, 14 / k);
   pick = {x, y}; dirty = true;
   const f = $("#showFlags").checked ? nearestFlag(x, y, rad) : null, n = nearest(x, y, rad);
-  let h = "座標 <b>" + x.toFixed(1) + ", " + y.toFixed(1) + "</b>";
-  if (n) h += "<br>最近: <b>" + (scene === "*" ? escapeHtml(n.code) + "・" : "") + escapeHtml(n.disp) + " " + (n.side || "") + "</b>" + (n.via ? "（" + n.via + "）" : "") + " 距 " + Math.hypot(n.x - x, n.y - y).toFixed(1) + "pt" + (n.note ? "<br>" + escapeHtml(n.note) : "");
+  let h = "座標 <b>" + getRevX(x).toFixed(1) + ", " + getRevY(y).toFixed(1) + "</b>";
+  if (n) h += "<br>最近: <b>" + (scene === "*" ? escapeHtml(n.code) + "・" : "") + escapeHtml(n.disp) + " " + (n.side || "") + "</b>" + (n.via ? "（" + n.via + "）" : "") + " 距 " + Math.hypot(getRevX(n.x) - getRevX(x), getRevY(n.y) - getRevY(y)).toFixed(1) + "pt" + (n.note ? "<br>" + escapeHtml(n.note) : "");
   else h += "<br>附近沒有 " + escapeHtml(sceneName(scene)) + " 的點";
   if (f) h += "<br><span class='warn'>異常 " + escapeHtml((f[1] || "") + " " + (f[2] || "")) + "：" + escapeHtml(f[5] || "") + "</span>";
   $("#msg").innerHTML = h;
-  setHash({s: scene, v: curView(), x: x.toFixed(1), y: y.toFixed(1), k: k.toFixed(2)});
+  setHash({s: scene, v: curView(), x: getRevX(x).toFixed(1), y: getRevY(y).toFixed(1), k: k.toFixed(2)});
 }
+
 mini.addEventListener("pointerdown", e => {
   const r = mini.getBoundingClientRect(), s = r.width / M.W;
   flyTo(M.x0 + (e.clientX - r.left) / s, M.y0 + (e.clientY - r.top) / s, k, 250);
 });
+
 addEventListener("keydown", e => {
   if (e.target.tagName === "INPUT" || e.target.tagName === "SELECT") { if (e.key === "Enter" && e.target.id === "q") doSearch(); return; }
   const st = 120 / k, i = CODES.indexOf(scene);
@@ -430,6 +482,7 @@ addEventListener("keydown", e => {
   else if (e.key === "ArrowLeft") { cx -= st; dirty = true; } else if (e.key === "ArrowRight") { cx += st; dirty = true; }
   else if (e.key === "ArrowUp") { cy -= st; dirty = true; } else if (e.key === "ArrowDown") { cy += st; dirty = true; }
 });
+
 $("#go").onclick = doSearch;
 document.querySelectorAll("input[name=side]").forEach(r => r.onchange = () => { if ($("#q").value.trim()) doSearch(); });
 $("#tog").onclick = () => { $("#panel").classList.toggle("min"); $("#tog").textContent = $("#panel").classList.contains("min") ? "＋" : "－"; };
@@ -449,7 +502,7 @@ document.querySelectorAll("input[name=view]").forEach(r => r.onchange = () => { 
   sel.value = scene;
   $("#views").style.display = scene === "*" || !PRESENT[M.all] ? "none" : "";
   if (h.id) { $("#q").value = h.id; setSide(h.side); doSearch(); }
-  else if (h.x && h.y) { const x = +h.x, y = +h.y; marker = {x, y, t: performance.now()}; flyTo(x, y, h.k ? +h.k : M.maxScale * 0.9, 0); }
+  else if (h.x && h.y) { const x = getPtX(+h.x), y = getPtY(+h.y); marker = {x, y, t: performance.now()}; flyTo(x, y, h.k ? +h.k : M.maxScale * 0.9, 0); }
   addEventListener("hashchange", () => { if (location.hash.slice(1) !== lastHash) location.reload(); });
   if (!IX.scenes.length) $("#msg").innerHTML = "<span class='warn'>沒有場景(index.js 空的), 先跑 DO_SPLIT / DO_INDEX</span>";
   requestAnimationFrame(frame);
